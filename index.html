@@ -2328,211 +2328,156 @@
     </script>
 
 <script>
-/* ===== INTEGRASI GOOGLE APPS SCRIPT =====
-   Ganti URL di bawah dengan URL Web App GAS yang berakhiran /exec.
+/* ===== INTEGRASI GOOGLE APPS SCRIPT MPI (PERBAIKAN) =====
+   WAJIB: ganti URL_GAS_ANDA_DISINI dengan URL Web App GAS yang berakhir /exec.
 */
 const GAS_URL = "https://script.google.com/macros/s/AKfycbw_k7tyBWTsk6VnsChKRHIWnx898h4eFfbubszCqUNtt7w9NaIqmJiL6NMfNR94x_OG/exec";
 const MPI_GAS = (() => {
   const answerLog = [];
-  let lastPracticeSubmitted = false;
+  let syncStarted = false;
 
   function send(payload) {
-    if (!GAS_URL || GAS_URL === "URL_GAS_ANDA_DISINI") {
-      console.warn("GAS_URL belum diatur. Data belum dikirim ke Google Sheets.", payload);
-      return Promise.resolve({ skipped: true });
+    if (!GAS_URL || GAS_URL === "URL_GAS_ANDA_DISINI" || !/\/exec(?:\?|$)/.test(GAS_URL)) {
+      console.error("MPI GAS: URL belum benar. Ganti GAS_URL dengan URL deployment Web App yang berakhir /exec.", payload.action);
+      return Promise.resolve({ ok: false, skipped: true, reason: "GAS_URL belum diatur" });
     }
-    // URLSearchParams menghindari preflight CORS pada GitHub Pages -> Apps Script.
-    const body = new URLSearchParams({ payload: JSON.stringify(payload) });
-    return fetch(GAS_URL, { method: "POST", mode: "no-cors", body, redirect: "follow" })
-      .then(() => ({ queued: true }))
-      .catch(error => {
-        console.error("Pengiriman ke Google Sheets gagal:", error);
-        return { queued: false, error: String(error) };
-      });
+    const body = new URLSearchParams();
+    body.set("payload", JSON.stringify(payload));
+    console.info("MPI GAS: mengirim", payload.action, payload.action === "syncQuestions" ? (payload.questions || []).length + " soal" : "hasil evaluasi");
+    return fetch(GAS_URL, {
+      method: "POST",
+      mode: "no-cors",
+      redirect: "follow",
+      body
+    }).then(() => {
+      // no-cors tidak mengizinkan browser membaca respons server. Status ini hanya berarti request dikirim browser.
+      console.info("MPI GAS: request terkirim; verifikasi hasilnya di Google Sheets.", payload.action);
+      return { ok: true, queued: true };
+    }).catch(error => {
+      console.error("MPI GAS: gagal mengirim", payload.action, error);
+      return { ok: false, error: String(error) };
+    });
   }
 
+  function safeArray(value) { return Array.isArray(value) ? value : []; }
+  // Khusus database Data Soal: isi hanya soal dari menu Evaluasi Akhir/Latihan.
+  // Data permainan tidak dimasukkan ke Data Soal agar tidak menggantikan soal latihan.
   function getQuestions() {
     const rows = [];
-    const add = (menu, id, question, options, answer, type, notes) => rows.push({
-      menu, id, question: String(question || ""),
-      options: Array.isArray(options) ? options.map(String) : [],
-      answer: answer === undefined || answer === null ? "" : String(answer),
-      type: type || "Pilihan ganda", notes: notes || ""
-    });
-    (learnData || []).forEach((q,i) => {
-      if (q.quiz) add("Belajar", `learn-${i+1}`, q.quiz.question || q.title,
-        q.quiz.options || [], q.quiz.answer, q.quiz.type, q.quiz.explanation || "");
-    });
-    (practiceData || []).forEach((q,i) => add("Berlatih", `practice-${i+1}`,
-      `${q.stimulus || ""} ${q.question || ""}`, q.options || [], q.answer,
-      "Pilihan ganda HOTS", `Level ${q.level || ""}; bobot ${q.weight || ""}`));
-    (clueQuestions || []).forEach((q,i) => add("Bermain - Petunjuk", `clue-${i+1}`,
-      q.q, q.opts, q.a, "Pilihan ganda", q.clue || ""));
-    (matchingPairs || []).forEach((q,i) => add("Bermain - Pasangan", `matching-${i+1}`,
-      `Pasangkan: ${q.visual}`, [q.answer], q.answer, "Memasangkan", q.clue || ""));
-    (crosswordWords || []).forEach((q,i) => add("Bermain - Teka-teki silang",
-      `crossword-${i+1}`, q.clue || q.question || `Kata ke-${i+1}`, [],
-      q.word || q.answer || "", "Teka-teki silang", ""));
+    const safe = value => Array.isArray(value) ? value : [];
+    if (typeof practiceData !== "undefined" && Array.isArray(practiceData)) {
+      practiceData.forEach((q, i) => {
+        if (!q) return;
+        const options = safe(q.options).map(v => String(v == null ? "" : v));
+        const answerText = typeof q.answer === "number"
+          ? (options[q.answer] || String(q.answer))
+          : (q.answer == null ? "" : String(q.answer));
+        rows.push({
+          menu: "Evaluasi Akhir",
+          id: `practice-${i + 1}`,
+          question: `${q.stimulus || ""} ${q.question || ""}`.trim(),
+          options,
+          answer: answerText,
+          type: "Pilihan ganda HOTS",
+          notes: `Level ${q.level || ""}; bobot ${q.weight || ""}`
+        });
+      });
+    }
     return rows;
   }
-
   function syncQuestions() {
-    return send({ action: "syncQuestions", questions: getQuestions() });
-  }
-
-  function record(menu, id, question, options, selected, correct, isCorrect, extra) {
-    answerLog.push({
-      menu, id, question: String(question || ""),
-      options: options || [],
-      jawabanSiswa: selected === undefined || selected === null ? "" : String(selected),
-      kunciJawaban: correct === undefined || correct === null ? "" : String(correct),
-      status: isCorrect ? "Benar" : "Salah",
-      detail: extra || ""
+    if (syncStarted) return Promise.resolve({ skipped: true, reason: "sync sudah dimulai" });
+    syncStarted = true;
+    const questions = getQuestions();
+    console.info("MPI GAS: total soal yang akan disinkronkan:", questions.length);
+    if (!questions.length) {
+      console.error("MPI GAS: tidak ada soal ditemukan. Periksa nama variabel data soal di HTML.");
+      syncStarted = false;
+      return Promise.resolve({ ok: false, reason: "Tidak ada soal" });
+    }
+    return send({ action: "syncQuestions", questions }).then(result => {
+      if (!result.ok) syncStarted = false;
+      return result;
     });
   }
-
+  function record(menu, id, question, options, selected, correct, isCorrect, extra) {
+    answerLog.push({ menu, id, question: String(question || ""), options: safeArray(options),
+      jawabanSiswa: selected == null ? "" : String(selected),
+      kunciJawaban: correct == null ? "" : String(correct),
+      status: isCorrect ? "Benar" : "Salah", detail: extra || "" });
+  }
   function submitResult(menu, records, scoreCorrect, scoreWrong, extra) {
     const student = (typeof state !== "undefined" && state.student) || {};
-    const detail = (records || []).map((r,i) => ({
-      nomor: i+1, menu: r.menu, idSoal: r.id, soal: r.question,
-      pilihanJawaban: r.options, jawabanSiswa: r.jawabanSiswa,
-      kunciJawaban: r.kunciJawaban, status: r.status, detail: r.detail || ""
+    const detail = safeArray(records).map((r, i) => ({
+      nomor: i + 1, menu: r.menu || menu, idSoal: r.id || r.idSoal || `soal-${i+1}`,
+      soal: r.question || r.soal || "", pilihanJawaban: safeArray(r.options || r.pilihanJawaban),
+      jawabanSiswa: r.jawabanSiswa == null ? "" : String(r.jawabanSiswa),
+      kunciJawaban: r.kunciJawaban == null ? "" : String(r.kunciJawaban),
+      status: r.status || "Tidak dijawab", detail: r.detail || ""
     }));
-    return send({
-      action: "saveResult", waktuPengerjaan: new Date().toISOString(),
-      namaSiswa: student.name || "Tidak diketahui",
-      kelas: student.class || "Tidak diketahui",
-      jumlahBenar: Number(scoreCorrect || 0),
-      jumlahSalah: Number(scoreWrong || 0),
-      menu, detailJawaban: detail, catatan: extra || ""
-    });
+    if (!detail.length) console.warn("MPI GAS: hasil dikirim tanpa rincian soal.", menu);
+    return send({ action: "saveResult", waktuPengerjaan: new Date().toISOString(),
+      namaSiswa: student.name || student.nama || "Tidak diketahui",
+      kelas: student.class || student.kelas || "Tidak diketahui",
+      jumlahBenar: Number(scoreCorrect || 0), jumlahSalah: Number(scoreWrong || 0),
+      menu, detailJawaban: detail, catatan: extra || "" });
   }
-
   function getLog(menu) { return answerLog.filter(x => x.menu === menu); }
   return { syncQuestions, record, submitResult, getLog, answerLog };
 })();
 
-// Catat jawaban kuis pada menu Belajar (jawaban salah dan benar).
-const _mpiCheckMiniQuiz = checkMiniQuiz;
-checkMiniQuiz = function(selectedIndex, correctIndex) {
-  const q = learnData[state.currentLearn].quiz;
-  MPI_GAS.record("Belajar", `learn-${state.currentLearn+1}`,
-    q.question || learnData[state.currentLearn].title, q.options || [],
-    (q.options || [])[selectedIndex], (q.options || [])[correctIndex],
-    selectedIndex === correctIndex);
-  return _mpiCheckMiniQuiz.apply(this, arguments);
-};
-
-// Catat pilihan yang dipilih pada setiap soal Berlatih.
-const _mpiSelectPractice = selectPractice;
-selectPractice = function(val) {
-  const i = state.currentPractice, q = practiceData[i];
-  MPI_GAS.record("Berlatih", `practice-${i+1}`, `${q.stimulus || ""} ${q.question || ""}`,
-    q.options || [], (q.options || [])[val], (q.options || [])[q.answer],
-    val === q.answer, `Level ${q.level || ""}; bobot ${q.weight || ""}`);
-  return _mpiSelectPractice.apply(this, arguments);
-};
-
-// Catat percobaan jawaban pada game petunjuk.
-const _mpiAnswerClueQuestion = answerClueQuestion;
-answerClueQuestion = function(i,j) {
-  const q = clueQuestions[i];
-  if (q) MPI_GAS.record("Bermain - Petunjuk", `clue-${i+1}`, q.q, q.opts,
-    q.opts[j], q.opts[q.a], j === q.a, q.clue || "");
-  return _mpiAnswerClueQuestion.apply(this, arguments);
-};
-
-// Catat pasangan gambar/istilah saat siswa mengirim pilihan istilah.
-const _mpiChooseMatchTerm = chooseMatchTerm;
-chooseMatchTerm = function(i) {
-  if (matchingSelected !== null && matchingPairs[i]) {
-    const q = matchingPairs[i];
-    MPI_GAS.record("Bermain - Pasangan", `matching-${i+1}`,
-      `Pasangkan: ${q.visual}`, matchingPairs.map(x=>x.answer),
-      q.answer, q.answer, matchingSelected === i, q.clue || "");
-  }
-  return _mpiChooseMatchTerm.apply(this, arguments);
-};
-
-// Saat asesmen selesai, simpan rekap dan detail seluruh input jawaban.
-const _mpiFinishPractice = finishPractice;
-finishPractice = function() {
-  if (practiceAnswers[state.currentPractice] === undefined) return _mpiFinishPractice.apply(this, arguments);
-  const records = practiceData.map((q,i) => ({
-    menu: "Berlatih", id: `practice-${i+1}`,
-    question: `${q.stimulus || ""} ${q.question || ""}`,
-    options: q.options || [],
-    jawabanSiswa: practiceAnswers[i] === undefined ? "Tidak dijawab" : (q.options || [])[practiceAnswers[i]],
-    kunciJawaban: (q.options || [])[q.answer],
-    status: practiceAnswers[i] === q.answer ? "Benar" : (practiceAnswers[i] === undefined ? "Tidak dijawab" : "Salah"),
-    detail: `Level ${q.level || ""}; bobot ${q.weight || ""}`
-  }));
-  const correct = records.filter(r => r.status === "Benar").length;
-  const wrong = records.length - correct;
-  MPI_GAS.submitResult("Berlatih", records, correct, wrong, `Skor berbobot: ${practiceData.reduce((sum,q,i)=>sum+(practiceAnswers[i]===q.answer?(q.weight||0):0),0)}`);
-  return _mpiFinishPractice.apply(this, arguments);
-};
-
-// Simpan hasil setiap mini-game saat siswa menyelesaikannya.
-const _mpiUpdatePlayCompletionStatus = updatePlayCompletionStatus;
-updatePlayCompletionStatus = function(game) {
-  let records = [];
-  if (game === "clues") {
-    records = clueQuestions.map((q,i)=>({
-      menu:"Bermain - Petunjuk", id:`clue-${i+1}`, question:q.q, options:q.opts,
-      jawabanSiswa: q.opts[(getLastAnswer("clue-"+(i+1), q.a))] || (clueSolved.has(i) ? q.opts[q.a] : "Tidak dijawab"),
-      kunciJawaban:q.opts[q.a], status:clueSolved.has(i)?"Benar":"Salah", detail:q.clue||""
-    }));
-  } else if (game === "matching") {
-    records = matchingPairs.map((q,i)=>({
-      menu:"Bermain - Pasangan", id:`matching-${i+1}`, question:`Pasangkan: ${q.visual}`,
-      options:matchingPairs.map(x=>x.answer), jawabanSiswa:matchingSolved.has(i)?q.answer:"Tidak dijawab",
-      kunciJawaban:q.answer,status:matchingSolved.has(i)?"Benar":"Salah",detail:q.clue||""
-    }));
-  } else if (game === "crossword") {
-    records = (crosswordWords || []).map((q,i)=>({
-      menu:"Bermain - Teka-teki silang",id:`crossword-${i+1}`,
-      question:q.clue||q.question||`Kata ke-${i+1}`,options:[],
-      jawabanSiswa:q.word||q.answer||"",kunciJawaban:q.word||q.answer||"",
-      status:"Benar",detail:"Game diselesaikan"
-    }));
-  }
-  const correct = records.filter(r=>r.status==="Benar").length;
-  MPI_GAS.submitResult(`Bermain - ${game}`, records, correct, records.length-correct, "Hasil mini-game");
-  return _mpiUpdatePlayCompletionStatus.apply(this, arguments);
-};
-// Jika nyawa habis, tetap kirim jawaban yang sudah tercatat sebelum kembali ke menu.
-const _mpiLoseGameLife = loseGameLife;
-loseGameLife = function(message) {
-  const ended = _mpiLoseGameLife.apply(this, arguments);
-  if (ended) {
-    const gameName = selectedPlayGame === "clues" ? "Bermain - Petunjuk"
-      : selectedPlayGame === "matching" ? "Bermain - Pasangan"
-      : selectedPlayGame === "crossword" ? "Bermain - Teka-teki silang" : "Bermain";
-    const attempts = MPI_GAS.getLog(gameName);
-    const correct = attempts.filter(x => x.status === "Benar").length;
-    const wrong = attempts.filter(x => x.status === "Salah").length;
-    MPI_GAS.submitResult(gameName, attempts.map(x => ({
-      menu: x.menu, idSoal: x.id, soal: x.question, pilihanJawaban: x.options,
-      jawabanSiswa: x.jawabanSiswa, kunciJawaban: x.kunciJawaban,
-      status: x.status, detail: x.detail
-    })), correct, wrong, "Game berakhir karena nyawa habis.");
-  }
-  return ended;
-};
-
-function getLastAnswer(id, fallback) {
-  const log = MPI_GAS.answerLog.filter(x=>x.id===id);
-  if (!log.length) return fallback;
-  const last = log[log.length-1];
-  const q = (typeof clueQuestions !== "undefined") ? clueQuestions.find(x=>x.q===last.question) : null;
-  return q ? q.opts.indexOf(last.jawabanSiswa) : fallback;
+// Catat kuis pada menu Belajar.
+if (typeof checkMiniQuiz === "function") {
+  const _mpiCheckMiniQuiz = checkMiniQuiz;
+  checkMiniQuiz = function(selectedIndex, correctIndex) {
+    const q = learnData[state.currentLearn].quiz;
+    MPI_GAS.record("Belajar", `learn-${state.currentLearn+1}`, q.question || learnData[state.currentLearn].title,
+      q.options || [], (q.options || [])[selectedIndex], (q.options || [])[correctIndex], selectedIndex === correctIndex);
+    return _mpiCheckMiniQuiz.apply(this, arguments);
+  };
 }
 
-// Pastikan dua sheet dan daftar soal dibuat otomatis saat aplikasi dibuka.
+// Catat jawaban yang dipilih pada Evaluasi Akhir.
+if (typeof selectPractice === "function") {
+  const _mpiSelectPractice = selectPractice;
+  selectPractice = function(val) {
+    const i = state.currentPractice, q = practiceData[i];
+    if (q) MPI_GAS.record("Evaluasi Akhir", `practice-${i+1}`, `${q.stimulus || ""} ${q.question || ""}`,
+      q.options || [], (q.options || [])[val], (q.options || [])[q.answer], val === q.answer,
+      `Level ${q.level || ""}; bobot ${q.weight || ""}`);
+    return _mpiSelectPractice.apply(this, arguments);
+  };
+}
+
+// Kirim semua soal dan seluruh jawaban saat siswa menekan tombol selesai evaluasi.
+if (typeof finishPractice === "function") {
+  const _mpiFinishPractice = finishPractice;
+  finishPractice = function() {
+    if (typeof practiceAnswers === "undefined" || practiceAnswers[state.currentPractice] === undefined) {
+      return _mpiFinishPractice.apply(this, arguments);
+    }
+    const records = practiceData.map((q, i) => ({
+      menu: "Evaluasi Akhir", id: `practice-${i+1}`,
+      question: `${q.stimulus || ""} ${q.question || ""}`, options: q.options || [],
+      jawabanSiswa: practiceAnswers[i] === undefined ? "Tidak dijawab" : ((q.options || [])[practiceAnswers[i]] || ""),
+      kunciJawaban: (q.options || [])[q.answer] || "",
+      status: practiceAnswers[i] === q.answer ? "Benar" : (practiceAnswers[i] === undefined ? "Tidak dijawab" : "Salah"),
+      detail: `Level ${q.level || ""}; bobot ${q.weight || ""}`
+    }));
+    const correct = records.filter(r => r.status === "Benar").length;
+    const wrong = records.length - correct;
+    // Jalankan pengiriman sebelum laporan berpindah layar.
+    MPI_GAS.submitResult("Evaluasi Akhir", records, correct, wrong,
+      `Skor berbobot: ${practiceData.reduce((sum, q, i) => sum + (practiceAnswers[i] === q.answer ? (q.weight || 0) : 0), 0)}`);
+    return _mpiFinishPractice.apply(this, arguments);
+  };
+}
+
+// Sinkronkan khusus soal Evaluasi Akhir setelah seluruh deklarasi data dimuat.
 window.addEventListener("load", () => {
-  setTimeout(() => MPI_GAS.syncQuestions(), 500);
+  setTimeout(() => MPI_GAS.syncQuestions().catch(err => console.error("MPI GAS: sinkronisasi soal gagal", err)), 800);
 });
+
 </script>
 </body>
 </html>
