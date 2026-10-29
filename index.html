@@ -2337,7 +2337,7 @@ const MPI_GAS = (() => {
   let lastPracticeSubmitted = false;
 
   function send(payload) {
-    if (!GAS_URL || GAS_URL === ") {
+    if (!GAS_URL || GAS_URL === "") {
       console.warn("GAS_URL belum diatur. Data belum dikirim ke Google Sheets.", payload);
       return Promise.resolve({ skipped: true });
     }
