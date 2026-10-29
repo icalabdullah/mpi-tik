@@ -2331,13 +2331,13 @@
 /* ===== INTEGRASI GOOGLE APPS SCRIPT =====
    Ganti URL di bawah dengan URL Web App GAS yang berakhiran /exec.
 */
-const GAS_URL = "URL_GAS_ANDA_DISINI";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbx-NIE3JXVXlVBL2x6fbOHOkQlMkl1mqNrlFwANv9k/dev";
 const MPI_GAS = (() => {
   const answerLog = [];
   let lastPracticeSubmitted = false;
 
   function send(payload) {
-    if (!GAS_URL || GAS_URL === "URL_GAS_ANDA_DISINI") {
+    if (!GAS_URL || GAS_URL === "https://script.google.com/macros/s/AKfycbx-NIE3JXVXlVBL2x6fbOHOkQlMkl1mqNrlFwANv9k/dev") {
       console.warn("GAS_URL belum diatur. Data belum dikirim ke Google Sheets.", payload);
       return Promise.resolve({ skipped: true });
     }
